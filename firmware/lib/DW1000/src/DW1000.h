@@ -74,7 +74,17 @@ public:
 	This basically just frees SPI and the previously used pins.
 	*/
 	static void end();
-	
+
+	/**
+	Sets the SPI clock used once the chip runs from its PLL (the "fast" rate). Takes effect on the
+	next SPI transaction. The DW1000 allows up to 20 MHz; the slow rate used while the chip is
+	clocked from its crystal is unaffected.
+
+	@param[in] hz SPI clock in Hz.
+	*/
+	static void setSPIClock(uint32_t hz);
+	static uint32_t getSPIClock();
+
 	/** 
 	Enable debounce Clock, used to clock the LED blinking
 	*/
@@ -556,7 +566,8 @@ public:
 	static const byte PLL_CLOCK  = 0x02;
 	
 	/* SPI configs. */
-	static const SPISettings _fastSPI;
+	static SPISettings _fastSPI;
+	static uint32_t _fastSPIClock;
 	static const SPISettings _slowSPI;
 	static const SPISettings* _currentSPI;
 	

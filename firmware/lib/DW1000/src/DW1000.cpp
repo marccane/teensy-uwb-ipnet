@@ -101,12 +101,22 @@ const byte DW1000Class::BIAS_900_64[] = {147, 133, 117, 99, 75, 50, 29, 0, 24, 4
 // SPI settings
 #ifdef ESP8266
 	// default ESP8266 frequency is 80 Mhz, thus divide by 4 is 20 MHz
-	const SPISettings DW1000Class::_fastSPI = SPISettings(20000000L, MSBFIRST, SPI_MODE0);
+	uint32_t DW1000Class::_fastSPIClock = 20000000L;
 #else
-	const SPISettings DW1000Class::_fastSPI = SPISettings(16000000L, MSBFIRST, SPI_MODE0);
+	uint32_t DW1000Class::_fastSPIClock = 16000000L;
 #endif
+SPISettings DW1000Class::_fastSPI = SPISettings(_fastSPIClock, MSBFIRST, SPI_MODE0);
 const SPISettings DW1000Class::_slowSPI = SPISettings(2000000L, MSBFIRST, SPI_MODE0);
 const SPISettings* DW1000Class::_currentSPI = &_fastSPI;
+
+void DW1000Class::setSPIClock(uint32_t hz) {
+	_fastSPIClock = hz;
+	_fastSPI = SPISettings(hz, MSBFIRST, SPI_MODE0);
+}
+
+uint32_t DW1000Class::getSPIClock() {
+	return _fastSPIClock;
+}
 
 /* ###########################################################################
  * #### Init and end #######################################################
@@ -1683,12 +1693,21 @@ void DW1000Class::readBytes(byte cmd, uint16_t offset, byte data[], uint16_t n) 
 	}
 	SPI.beginTransaction(*_currentSPI);
 	digitalWrite(_ss, LOW);
+#if defined(__IMXRT1062__)
+	// Teensy 4: buffered transfers keep the LPSPI FIFO full instead of paying
+	// the per-byte call overhead (matters for 1 KB frame reads). JUNK == 0 is
+	// the default fill byte sent while reading.
+	(void)i;
+	SPI.transfer(header, nullptr, headerLen);
+	SPI.transfer(nullptr, data, n);
+#else
 	for(i = 0; i < headerLen; i++) {
 		SPI.transfer(header[i]); // send header
 	}
 	for(i = 0; i < n; i++) {
 		data[i] = SPI.transfer(JUNK); // read values
 	}
+#endif
 	delayMicroseconds(5);
 	digitalWrite(_ss, HIGH);
 	SPI.endTransaction();
@@ -1755,12 +1774,18 @@ void DW1000Class::writeBytes(byte cmd, uint16_t offset, byte data[], uint16_t da
 	}
 	SPI.beginTransaction(*_currentSPI);
 	digitalWrite(_ss, LOW);
+#if defined(__IMXRT1062__)
+	(void)i;
+	SPI.transfer(header, nullptr, headerLen);
+	SPI.transfer(data, nullptr, data_size);
+#else
 	for(i = 0; i < headerLen; i++) {
 		SPI.transfer(header[i]); // send header
 	}
 	for(i = 0; i < data_size; i++) {
 		SPI.transfer(data[i]); // write values
 	}
+#endif
 	delayMicroseconds(5);
 	digitalWrite(_ss, HIGH);
 	SPI.endTransaction();
