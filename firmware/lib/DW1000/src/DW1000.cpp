@@ -222,23 +222,28 @@ void DW1000Class::manageLDE() {
 void DW1000Class::enableClock(byte clock) {
 	byte pmscctrl0[LEN_PMSC_CTRL0];
 	memset(pmscctrl0, 0, LEN_PMSC_CTRL0);
+	// The chip may be running on its 19.2 MHz crystal clock, where SPI must
+	// stay below 3 MHz, so read and write PMSC_CTRL0 at the slow clock and
+	// only go fast once the chip has left the crystal clock.
+	_currentSPI = &_slowSPI;
 	readBytes(PMSC, PMSC_CTRL0_SUB, pmscctrl0, LEN_PMSC_CTRL0);
 	if(clock == AUTO_CLOCK) {
-		_currentSPI = &_fastSPI;
 		pmscctrl0[0] = AUTO_CLOCK;
 		pmscctrl0[1] &= 0xFE;
 	} else if(clock == XTI_CLOCK) {
-		_currentSPI = &_slowSPI;
 		pmscctrl0[0] &= 0xFC;
 		pmscctrl0[0] |= XTI_CLOCK;
 	} else if(clock == PLL_CLOCK) {
-		_currentSPI = &_fastSPI;
 		pmscctrl0[0] &= 0xFC;
 		pmscctrl0[0] |= PLL_CLOCK;
 	} else {
 		// TODO deliver proper warning
 	}
 	writeBytes(PMSC, PMSC_CTRL0_SUB, pmscctrl0, 2);
+	if(clock == AUTO_CLOCK || clock == PLL_CLOCK) {
+		delayMicroseconds(100);
+		_currentSPI = &_fastSPI;
+	}
 }
 
 void DW1000Class::enableDebounceClock() {

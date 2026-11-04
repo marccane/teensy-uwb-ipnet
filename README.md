@@ -91,7 +91,9 @@ adjusting:
   after each one. It's harmless either way.
 - **Frame-filter rejections** are treated like receive errors (receiver reset),
   as Decawave's driver does. `stats` counts them as "filtered".
-- **SPI at 20 MHz** on this board's traces (`spitest`).
+- **SPI at 20 MHz** on this board's traces (`spitest`). One board passed
+  2-24 MHz, and the driver's clock switch at 6-20 MHz, with the same driver in
+  a separate test firmware; other boards are untested.
 
 ## Console
 
