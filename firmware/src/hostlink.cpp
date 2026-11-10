@@ -96,7 +96,9 @@ bool queueIp() {
     stats.usbRxDropped++;
     return true;
   }
-  if (radio::txQueueFree() == 0) return false;
+  // Packets beyond ipqueue wait in the host's interface queue, where the
+  // kernel can drop or reorder them sensibly, instead of in our FIFO.
+  if (radio::txQueueFree() == 0 || radio::txQueued() >= liveConfig().ipQueue) return false;
   const uint8_t* ip = msg + 1;
   const size_t ipLen = msgLen - 1;
   const bool arq = liveConfig().udpArq || !frame::isUdp(ip, ipLen);

@@ -19,9 +19,13 @@ struct Config {
   uint16_t peerAddr;     // 0 = learn from the first frame heard, 0xFFFF = always broadcast
   uint16_t backoffUs;    // pause after our own frame before the next, so the peer can reply
   uint32_t spiHz;        // DW1000 SPI clock once the chip runs from its PLL
+  uint8_t ipQueue;       // IP packets that may wait for the radio, 1..kMaxIpQueue
 };
 
 namespace config {
+
+// Radio transmit queue length; ipQueue can use all of it.
+constexpr uint8_t kMaxIpQueue = 16;
 
 Config defaults();
 
@@ -40,7 +44,7 @@ uint8_t defaultPreambleCode(uint8_t channel, uint8_t prfMhz);
 uint8_t effectivePreambleCode(const Config& cfg);
 
 // Persistent form: magic, version, fields, CRC-32.
-constexpr size_t kBlobSize = 37;
+constexpr size_t kBlobSize = 38;
 void serialize(const Config& cfg, uint8_t* blob);
 bool deserialize(const uint8_t* blob, Config* out);
 

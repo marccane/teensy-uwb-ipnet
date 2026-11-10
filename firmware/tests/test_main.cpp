@@ -160,6 +160,13 @@ static void testConfig() {
   CHECK(config::set(c, "pan", "0xBEEF") == nullptr && c.panId == 0xBEEF);
   CHECK(config::set(c, "spi", "12") == nullptr && c.spiHz == 12000000);
   CHECK(config::set(c, "spi", "21") != nullptr);
+  CHECK(config::set(c, "ipqueue", "4") == nullptr && c.ipQueue == 4);
+  CHECK(config::validate(c) == nullptr);
+  c.ipQueue = 0;
+  CHECK(config::validate(c) != nullptr);
+  c.ipQueue = 17;
+  CHECK(config::validate(c) != nullptr);
+  c.ipQueue = 4;
   CHECK(config::set(c, "channel", "5x") != nullptr);
   CHECK(config::set(c, "nope", "1") != nullptr);
   CHECK(config::set(c, "profile", "long") == nullptr);

@@ -31,6 +31,7 @@ void poll();
 // (broadcast while none is known). arq=false never requests an ACK.
 bool send(const uint8_t* msdu, size_t len, uint16_t dst = 0, bool arq = true);
 size_t txQueueFree();
+size_t txQueued();
 bool txIdle();
 
 bool ready();

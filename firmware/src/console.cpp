@@ -133,8 +133,8 @@ void cmdConfig(Print& o) {
            c.preambleLen);
   o.printf("pcode %u\r\npan %04x\r\naddr %04x\r\npeer %04x\r\n", c.preambleCode, c.panId,
            c.shortAddr, c.peerAddr);
-  o.printf("retries %u\r\nudparq %u\r\nbackoff %u\r\ntxpower %08lx\r\nspi %lu\r\n", c.retries,
-           c.udpArq, c.backoffUs, c.txPower, c.spiHz / 1000000);
+  o.printf("retries %u\r\nudparq %u\r\nbackoff %u\r\ntxpower %08lx\r\nspi %lu\r\nipqueue %u\r\n",
+           c.retries, c.udpArq, c.backoffUs, c.txPower, c.spiHz / 1000000, c.ipQueue);
 }
 
 void apply(Print& o, const Config& c) {

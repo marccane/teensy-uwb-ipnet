@@ -73,6 +73,7 @@ constexpr uint32_t kStTxDone = kStTxFrb | kStTxPrs | kStTxPhs | kStTxFrs;
 constexpr uint32_t kIrqMask = kStTxFrs | kStRxFcg | kStRxErrIrq;
 
 constexpr uint32_t kDevIdDw1000 = 0xDECA0130;
+static_assert(config::kMaxIpQueue <= kTxQueueLen, "ipqueue cannot exceed the radio queue");
 constexpr uint16_t kOtpXtalTrim = 0x01E;
 
 constexpr uint32_t kAckMarginUs = 300;          // ACK wait beyond its airtime
@@ -702,6 +703,7 @@ bool send(const uint8_t* msdu, size_t len, uint16_t dst, bool arq) {
 }
 
 size_t txQueueFree() { return kTxQueueLen - txCount; }
+size_t txQueued() { return txCount; }
 bool txIdle() { return txCount == 0; }
 bool ready() { return isReady; }
 uint32_t deviceId() { return devId; }

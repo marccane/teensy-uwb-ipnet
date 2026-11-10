@@ -8,7 +8,7 @@ namespace config {
 namespace {
 
 constexpr uint8_t kMagic[4] = {'U', 'W', 'B', 'N'};
-constexpr uint16_t kVersion = 1;
+constexpr uint16_t kVersion = 2;
 constexpr size_t kHeaderLen = 8;
 constexpr size_t kPayloadLen = kBlobSize - kHeaderLen - 4;
 
@@ -108,6 +108,7 @@ const char* const kKeysHelp =
     "  retries 0..15            link retransmissions, 0 = no ACKs\n"
     "  udparq 0|1               also ACK/retransmit UDP packets\n"
     "  backoff 0..10000         pause after own frame so the peer can reply, us\n"
+    "  ipqueue 1..16            IP packets allowed to wait for the radio\n"
     "  txpower <hex>            TX_POWER register, 0 = reference value\n"
     "  spi 1..20                SPI clock, MHz\n";
 
@@ -126,6 +127,7 @@ Config defaults() {
   c.peerAddr = 0;
   c.backoffUs = 300;
   c.spiHz = kMaxSpiHz;
+  c.ipQueue = 8;  // measured: ~5 % less TCP throughput than 16, a third less delay
   return c;
 }
 
@@ -179,6 +181,7 @@ const char* validate(const Config& c) {
   if (c.shortAddr && c.peerAddr == c.shortAddr) return "peer equals own addr";
   if (c.backoffUs > 10000) return "backoff must be 0..10000";
   if (c.spiHz < kMinSpiHz || c.spiHz > kMaxSpiHz) return "spi must be 1..20 MHz";
+  if (c.ipQueue < 1 || c.ipQueue > kMaxIpQueue) return "ipqueue must be 1..16";
   return nullptr;
 }
 
@@ -209,7 +212,7 @@ const char* set(Config& c, const char* key, const char* value) {
       {"channel", 10, 255}, {"prf", 10, 255},     {"rate", 10, 65535},  {"plen", 10, 65535},
       {"pcode", 10, 255},   {"retries", 10, 255}, {"udparq", 10, 255},  {"txpower", 16, 0xFFFFFFFF},
       {"pan", 16, 0xFFFF},  {"addr", 16, 0xFFFF}, {"peer", 16, 0xFFFF}, {"backoff", 10, 65535},
-      {"spi", 10, 20},
+      {"spi", 10, 20},      {"ipqueue", 10, 255},
   };
   const Field* f = nullptr;
   for (const Field& candidate : kFields) {
@@ -231,6 +234,7 @@ const char* set(Config& c, const char* key, const char* value) {
   else if (!strcmp(key, "peer")) c.peerAddr = v;
   else if (!strcmp(key, "backoff")) c.backoffUs = v;
   else if (!strcmp(key, "spi")) c.spiHz = v * 1000000;
+  else if (!strcmp(key, "ipqueue")) c.ipQueue = v;
   return nullptr;
 }
 
@@ -252,6 +256,7 @@ void serialize(const Config& c, uint8_t* blob) {
   w.u16(c.peerAddr);
   w.u16(c.backoffUs);
   w.u32(c.spiHz);
+  w.u8(c.ipQueue);
   Writer(blob + kHeaderLen + kPayloadLen).u32(crc32(blob, kHeaderLen + kPayloadLen));
 }
 
@@ -275,6 +280,7 @@ bool deserialize(const uint8_t* blob, Config* out) {
   c.peerAddr = r.u16();
   c.backoffUs = r.u16();
   c.spiHz = r.u32();
+  c.ipQueue = r.u8();
   if (validate(c)) return false;
   *out = c;
   return true;
