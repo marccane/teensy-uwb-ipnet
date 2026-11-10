@@ -1,3 +1,4 @@
 firmware/.pio/
 firmware/compile_commands.json
 firmware/tests/build/
+host/uwbnetd

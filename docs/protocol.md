@@ -36,8 +36,11 @@ resynchronises by discarding bytes up to the next `0x00`.
 - Every CMD gets exactly one RESP, in order. DATA messages may arrive between
   a CMD and its RESP. While the port is open a RESP is never dropped: the
   device stops reading until the host has made room for it.
-- Flow control is USB's own: when the radio's 16-frame queue is full the
-  device stops reading, so the host's writes block. The host must therefore
+- Flow control is USB's own: once `ipqueue` IP packets (default 8, at most
+  16) are waiting for the radio, the device stops reading, so the host's writes
+  block. `uwbnetd` also keeps at most one transfer pending in the `cdc_acm`
+  driver (checked with `TIOCOUTQ`), so the waiting happens in the host's
+  interface queue rather than in USB buffers. The host must therefore
   keep reading while it writes (non-blocking I/O or separate reader and
   writer), or the two ends can wait on each other.
 - While there is no link (radio down, or nothing heard from the peer for
