@@ -98,7 +98,10 @@ static void testFrame() {
   // The DW1000 auto-ACK: FC 0x0002, seq.
   const uint8_t ack[] = {0x02, 0x00, 0x42};
   CHECK(frame::parse(ack, 3, &h) == frame::kAckLen);
-  CHECK(h.type == frame::kTypeAck && h.seq == 0x42);
+  CHECK(h.type == frame::kTypeAck && h.seq == 0x42 && !h.framePending);
+  const uint8_t ackPending[] = {0x12, 0x00, 0x43};  // frame pending bit set
+  CHECK(frame::parse(ackPending, 3, &h) == frame::kAckLen);
+  CHECK(h.type == frame::kTypeAck && h.framePending && h.seq == 0x43);
 
   // Unsupported: extended addressing, security, truncated.
   frame::writeDataHeader(buf, 1, 1, 2, 3, false);

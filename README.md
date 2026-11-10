@@ -130,12 +130,14 @@ setting, over 20 dB above that and likely beyond the regulatory limit.
 | `flood [seconds] [size]` | one-way throughput test |
 | `stop` or Ctrl-C | stop a test |
 | `spitest [MHz ...]` | SPI check, default 2..20 MHz |
+| `opt [preload\|ackpend\|dblbuf on\|off]` | throughput features, for experiments (not saved) |
 | `reg <id> [sub] [len]` | read a DW1000 register (hex) |
 | `reset` | reset and reconfigure the DW1000 |
 | `reboot` / `bootloader` | restart / enter the Teensy bootloader |
 
 Defaults: channel 5, PRF 64 MHz, 6.8 Mbit/s, preamble 128 (code 10), PAN
-`5557`, peer learned automatically, 3 retries, `backoff 300`, `ipqueue 8`.
+`5557`, peer learned automatically, 3 retries, `backoff 800` (pause when the
+peer's ACK says it has data), `ipqueue 8`.
 
 ## Measured performance
 
@@ -144,40 +146,21 @@ defaults throughout, RSSI about -67 dBm (2026-11-10).
 
 | Test | Result |
 |---|---|
-| Radio only, `flood 10` (1012-byte frames) | 3.83 Mbit/s, 4739/4739 frames, no retransmissions |
+| Radio only, `flood 10` (1012-byte frames) | 4.04 Mbit/s, ~0.2 % retransmissions |
 | Radio only, `ping` 64 / 1012 bytes | 1.0 / 4.9 ms round trip, no loss |
-| IP ping, idle | 2.1 ms |
-| IP ping, 1011-byte packets | 6.6 ms, no loss |
-| TCP (iperf3), A→B / B→A | 3.05 / 2.97 Mbit/s |
-| Ping while TCP runs | 21-23 ms |
+| IP ping, idle | 1.8 ms |
+| IP ping, 1011-byte packets | 6.4 ms, no loss |
+| TCP (iperf3), A→B / B→A | 2.9-3.0 / 3.0-3.1 Mbit/s |
+| Ping while TCP runs | ~20 ms |
 | UDP at 3 Mbit/s | 0 % loss |
-| UDP at 5 Mbit/s (overload) | 3.35 Mbit/s delivered, ping 52 ms |
+| UDP at 5 Mbit/s (overload) | 3.5 Mbit/s delivered, ping 49 ms |
 
-During TCP the radio retransmits 3-6 % of frames (collisions between data
-and TCP ACKs). Out of ~25,000 frames 5 ran out of retries.
-
-The two knobs that matter, measured the same way:
-
-| `backoff` (us) | 0 | 150 | **300** | 600 | 900 |
-|---|---|---|---|---|---|
-| TCP A→B, Mbit/s | 2.71 | 3.13 | 3.03 | 2.29 | 2.72 |
-| radio retransmissions | 27 % | 5 % | 5 % | 53 % | 3 % |
-
-A receiver needs about 0.6 ms after a full frame (reading 1 KB at 20 MHz plus
-handling) before it can send its own reply. A pause shorter than that lets the
-sender continue while the receiver defers. A pause close to it makes both ends
-start at the same moment. A much longer pause just costs time.
-
-| `ipqueue` | 2 | 4 | **8** | 16 |
-|---|---|---|---|---|
-| TCP A→B, Mbit/s | 2.62 | 2.79 | 2.96 | 3.14 |
-| ping while TCP runs | 11 ms | 17 ms | 23 ms | 37 ms |
-| ping under UDP overload | 37 ms | 41 ms | 51 ms | 69 ms |
-
-`ipqueue` limits how many IP packets wait in the board. Packets beyond that
-wait in the host's interface queue (length 8, `uwbnetd -q`). Without these
-limits a full TUN queue (500 packets by default) and the `cdc_acm` USB driver
-(16 transfers in flight) added up to a second of delay.
+Why this is about half of 6.8 Mbit/s, what was tried to get more (preloading
+frames, double buffering, ACK-driven pauses), what worked and what didn't:
+[docs/throughput.md](docs/throughput.md). In short:
+- one-way traffic is limited by moving each 1 KB frame over SPI (450 µs at
+  the DW1000's 20 MHz maximum);
+- TCP is limited by its own ACKs, each of which costs a full radio exchange.
 
 ## Design notes
 
@@ -191,11 +174,26 @@ retries) hides that from TCP. Wi-Fi does the same for the same reason. For
 UDP that would rather lose than wait, `set udparq 0` sends UDP without ACKs
 while TCP keeps them, and `set retries 0` turns ACKs off completely.
 
+**Channel access.** UWB has no real carrier sense. The firmware:
+- defers while the chip reports an incoming preamble;
+- uses the 802.15.4 "frame pending" bit in the hardware ACKs to take turns:
+  a node with queued frames sets it in its ACKs, and the sender then pauses
+  `backoff` µs for it.
+
+A pause that is fixed and the same for both ends turned out to be fragile:
+with some values both ends start together every time
+([docs/throughput.md](docs/throughput.md)).
+
 **Still unverified:** whether the DW1000's hardware ACK touches the TX buffer.
 The firmware rewrites the first 16 bytes after each one, which is harmless
 either way.
 
-**Possible later improvements**: DW1000 RX double buffering (receive the next
-frame while the previous one is read out, which would also shorten the reply
-time above), CDC-NCM so no host daemon is needed, header compression, a
-systemd unit and udev rule for `uwbnetd`.
+**Possible later improvements:**
+- aggregating several small packets into one radio frame, which would help
+  TCP most;
+- a 64-symbol preamble;
+- CDC-NCM, so no host daemon is needed;
+- a systemd unit and udev rule for `uwbnetd`.
+
+Double buffering was tried and doesn't work on this chip; see the throughput
+doc.

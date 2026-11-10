@@ -70,6 +70,7 @@ void cmdHelp(Print& o) {
             "flood [seconds] [size]  throughput test towards the peer\n"
             "stop                    stop a running test (also Ctrl-C)\n"
             "spitest [MHz ...]       SPI integrity test, default 2..20 MHz\n"
+            "opt [preload|ackpend|dblbuf on|off]  throughput features (not saved)\n"
             "reg <id> [sub] [len]    read a DW1000 register (hex id and sub)\n"
             "reset                   reset and reconfigure the DW1000\n"
             "reboot | bootloader     restart / enter the Teensy bootloader\n");
@@ -116,7 +117,8 @@ void cmdStats(Print& o, int argc, char** argv) {
            s.rxBytes, s.rxDup, s.rxAcks, s.rxBadFrame);
   o.printf("      errors: phr %lu, fcs %lu, sync %lu, sfd timeout %lu, timeout %lu\r\n",
            s.rxErrPhr, s.rxErrFcs, s.rxErrSync, s.rxErrSfdTimeout, s.rxTimeouts);
-  o.printf("      filtered (other PAN/address) %lu\r\n", s.rxFiltered);
+  o.printf("      filtered (other PAN/address) %lu, overruns %lu\r\n", s.rxFiltered,
+           s.rxOverruns);
   o.printf("      receiver restarts %lu, radio resets %lu, pll flags %lu\r\n", s.rxRestarts,
            s.radioResets, s.pllLossFlags);
   o.printf("usb:  %lu in, %lu bad, %lu dropped (no link), %lu out, %lu dropped\r\n",
@@ -194,6 +196,34 @@ void cmdSpiTest(Print& o, int argc, char** argv) {
              mhz[i], actualSpiHz(hz) / 1000, errors ? "FAIL" : "ok", errors, kSpiTestRounds, us);
   }
   if (!applyConfig(liveConfig())) o.print("error: radio did not come back up\r\n");
+}
+
+void cmdOpt(Print& o, int argc, char** argv) {
+  radio::Tuning& t = radio::tuning();
+  if (argc == 3) {
+    const bool on = !strcmp(argv[2], "on") || !strcmp(argv[2], "1");
+    if (!on && strcmp(argv[2], "off") && strcmp(argv[2], "0")) {
+      o.print("usage: opt [preload|ackpend|dblbuf on|off]\r\n");
+      return;
+    }
+    if (!strcmp(argv[1], "preload")) {
+      t.preload = on;
+    } else if (!strcmp(argv[1], "ackpend")) {
+      t.ackPend = on;
+    } else if (!strcmp(argv[1], "dblbuf")) {
+      t.dblBuf = on;
+      linktest::stop();
+      if (!applyConfig(liveConfig())) o.print("error: radio did not come back up\r\n");
+    } else {
+      o.print("usage: opt [preload|ackpend|dblbuf on|off]\r\n");
+      return;
+    }
+  } else if (argc != 1) {
+    o.print("usage: opt [preload|ackpend|dblbuf on|off]\r\n");
+    return;
+  }
+  o.printf("preload %s\r\nackpend %s\r\ndblbuf %s\r\n", t.preload ? "on" : "off",
+           t.ackPend ? "on" : "off", t.dblBuf ? "on" : "off");
 }
 
 void cmdReg(Print& o, int argc, char** argv) {
@@ -282,6 +312,8 @@ void exec(char* line, Print& o) {
     linktest::stop();
   } else if (!strcmp(cmd, "spitest")) {
     cmdSpiTest(o, argc, argv);
+  } else if (!strcmp(cmd, "opt")) {
+    cmdOpt(o, argc, argv);
   } else if (!strcmp(cmd, "reg")) {
     cmdReg(o, argc, argv);
   } else if (!strcmp(cmd, "reset")) {

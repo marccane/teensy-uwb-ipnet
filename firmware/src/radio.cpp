@@ -27,11 +27,13 @@ constexpr uint16_t kSubPmscSoftReset = 0x03;  // PMSC_CTRL0, byte 3
 constexpr uint8_t kSoftResetRx = 0xE0;
 constexpr uint8_t kSoftResetClear = 0xF0;
 constexpr uint16_t kSysCfgAutoAckBit = 30;
+constexpr uint16_t kSysCfgAckPendBit = 31;  // AACKPEND: set "frame pending" in our auto-ACKs
 
 constexpr uint32_t kCtrlTxStart = 1u << 1;
 constexpr uint32_t kCtrlTrxOff = 1u << 6;
 constexpr uint32_t kCtrlWait4Resp = 1u << 7;
 constexpr uint32_t kCtrlRxEnable = 1u << 8;
+constexpr uint32_t kCtrlHrbpt = 1u << 24;  // toggle the host-side RX buffer (double buffering)
 
 constexpr uint32_t kStAat = 1u << 3;
 constexpr uint32_t kStTxFrb = 1u << 4;
@@ -49,11 +51,14 @@ constexpr uint32_t kStRxFce = 1u << 15;
 constexpr uint32_t kStRxRfsl = 1u << 16;
 constexpr uint32_t kStRxRfto = 1u << 17;
 constexpr uint32_t kStLdeErr = 1u << 18;
+constexpr uint32_t kStRxOvrr = 1u << 20;  // both RX buffers full
 constexpr uint32_t kStRxPto = 1u << 21;
 constexpr uint32_t kStRfPllLl = 1u << 24;
 constexpr uint32_t kStClkPllLl = 1u << 25;
 constexpr uint32_t kStRxSfdTo = 1u << 26;
 constexpr uint32_t kStAffRej = 1u << 29;
+constexpr uint32_t kStHsrbp = 1u << 30;  // host-side RX buffer pointer
+constexpr uint32_t kStIcrbp = 1u << 31;  // IC-side RX buffer pointer
 
 constexpr uint32_t kStTxAll = kStAat | kStTxFrb | kStTxPrs | kStTxPhs | kStTxFrs;
 constexpr uint32_t kStRxGood = kStRxPrd | kStRxSfdd | kStLdeDone | kStRxPhd | kStRxDfr | kStRxFcg;
@@ -64,7 +69,7 @@ constexpr uint32_t kStPll = kStRfPllLl | kStClkPllLl;
 // Frame-filter rejections (AFFREJ) are handled like errors, as Decawave's
 // driver does, rather than relying on the receiver re-arming by itself.
 constexpr uint32_t kStRxErrIrq =
-    kStRxPhe | kStRxFce | kStRxRfsl | kStRxSfdTo | kStAffRej | kStRxTimeout;
+    kStRxPhe | kStRxFce | kStRxRfsl | kStRxSfdTo | kStAffRej | kStRxOvrr | kStRxTimeout;
 // TX status bits other than AAT. AAT belongs to the received frame and is only
 // cleared in onRxGood(), so a frame completing mid-handler keeps it.
 constexpr uint32_t kStTxDone = kStTxFrb | kStTxPrs | kStTxPhs | kStTxFrs;
@@ -85,9 +90,14 @@ constexpr uint32_t kLinkTimeoutMs = 3500;
 constexpr uint32_t kRxIdleRestartMs = 3000;
 constexpr uint32_t kRecoverIntervalMs = 5000;  // retry a radio that failed to come up
 constexpr uint16_t kLoadChunk = 256;  // TX buffer bytes written per poll(); never 0xFF-aligned
+// Margin when timing preload writes against the ACK's arrival.
+constexpr uint32_t kPreloadMarginUs = 15;
 // Bytes rewritten after an auto-ACK. Unknown whether the ACK touches the TX
 // buffer at all; if it does, it can only have overwritten the start.
 constexpr uint16_t kDirtyRewriteLen = 16;
+// RX buffer bytes read per SPI transaction while an auto-ACK is going out, so
+// the receiver can be re-armed as soon as the ACK is done.
+constexpr uint16_t kRxChunk = 128;
 
 struct TxSlot {
   uint16_t len;
@@ -100,22 +110,33 @@ TxSlot txq[kTxQueueLen];
 size_t txHead = 0;
 size_t txCount = 0;
 
-// The queue head once it has been turned into a PSDU. Kept until the frame is
-// acked or given up, so retransmissions reuse it.
-struct {
+// A queued frame turned into a PSDU. Kept until the frame is acked or given
+// up, so retransmissions reuse it.
+struct TxFrame {
   bool built;
   bool wantAck;
   uint8_t seq;
   uint8_t attempts;
   uint16_t psduLen;  // including FCS
-  uint16_t loaded;   // bytes already written to the DW1000 TX buffer
   uint32_t airUs;
   uint8_t psdu[frame::kMaxPsdu];
-} cur;
+};
+
+// cur is the queue head (in flight); nxt the frame after it, prepared while
+// cur waits for its ACK. They swap when cur completes.
+TxFrame frames[2];
+TxFrame* cur = &frames[0];
+TxFrame* nxt = &frames[1];
+
+// What the DW1000 TX buffer holds: the kLoadChunk-sized chunks of bufFrame's
+// PSDU whose bits are set in bufChunks.
+const TxFrame* bufFrame = nullptr;
+uint8_t bufChunks = 0;
 
 enum class Outcome { kAcked, kSentNoAck, kFailed };
 
 Config cfg;
+Tuning tune;
 bool isReady = false;
 bool notFoundLogged = false;
 uint32_t lastRecoverMs = 0;
@@ -134,9 +155,14 @@ bool txActive = false;  // our frame is on air
 uint32_t txStartUs = 0;
 bool ackPending = false;  // our frame went out, waiting for its ACK
 uint32_t ackDeadlineUs = 0;
+uint32_t ownTxDoneUs = 0;      // when we noticed our frame was out
+uint32_t ackContentUs = 0;     // after our frame ends, when the ACK's bytes start arriving
+uint32_t chunkWriteUs = 0;     // time to write one kLoadChunk at the current SPI clock
 bool autoAckActive = false;  // the chip is sending an ACK for a frame we received
 uint32_t autoAckStartUs = 0;
 bool txBufferDirty = false;  // an auto-ACK went out since the TX buffer was loaded
+bool ackPendBit = false;     // AACKPEND as last written to SYS_CFG
+bool peerHadData = false;    // the last ACK we got carried "frame pending"
 bool deferring = false;
 uint32_t deferStartUs = 0;
 uint32_t txNotBeforeUs = 0;
@@ -194,16 +220,29 @@ void clearStatus(uint32_t bits) { writeReg32(SYS_STATUS, bits); }
 void writeCtrl(uint32_t bits) { writeReg32(SYS_CTRL, bits); }
 void rxEnable() { writeCtrl(kCtrlRxEnable); }
 
+// Double buffering: hands the buffer just read back to the receiver.
+void releaseRxBuffer() { writeCtrl(kCtrlHrbpt); }
+
+// Double buffering: points host and IC at the same buffer, dropping any frame
+// not yet read (Decawave's dwt_syncrxbufptrs). Only call with the receiver
+// off and no frame being read.
+void syncRxBuffers() {
+  if (!tune.dblBuf) return;
+  const uint32_t st = readStatus();
+  if (!(st & kStIcrbp) != !(st & kStHsrbp)) releaseRxBuffer();
+}
+
 // Turn the receiver off, reset it and re-arm it. Required after receive
 // errors, and after an auto-ACK sent while WAIT4RESP was active (the chip
 // would otherwise re-apply WAIT4RESP).
 void restartRx() {
   writeCtrl(kCtrlTrxOff);
+  clearStatus(kStRxGood | kStRxErr | kStRxTimeout);
   uint8_t v = kSoftResetRx;
   DW1000.writeBytes(PMSC, kSubPmscSoftReset, &v, 1);
   v = kSoftResetClear;
   DW1000.writeBytes(PMSC, kSubPmscSoftReset, &v, 1);
-  clearStatus(kStRxGood | kStRxErr | kStRxTimeout);
+  syncRxBuffers();
   rxEnable();
   deferring = false;  // whatever we were deferring to is gone
 }
@@ -273,6 +312,9 @@ void configureChip() {
   DW1000.setFrameFilterAllowData(true);
   DW1000.setFrameFilterAllowAcknowledgement(true);
   DW1000.setBit(DW1000._syscfg, LEN_SYS_CFG, kSysCfgAutoAckBit, true);
+  DW1000.setDoubleBuffering(tune.dblBuf);
+  DW1000.setBit(DW1000._syscfg, LEN_SYS_CFG, kSysCfgAckPendBit, false);
+  ackPendBit = false;
   DW1000.commitConfiguration();
 
   // tune() reads the factory crystal trim from OTP while running on the PLL;
@@ -304,8 +346,13 @@ void configureChip() {
   ackTimeout = ackAir + kAckMarginUs;
   autoAckTimeout = ackAir + kAutoAckMarginUs;
   maxAirtime = phy::frameAirtimeUs(mode, frame::kMaxPsdu);
+  // An empty PSDU's airtime is the ACK's preamble + SFD + PHR.
+  ackContentUs = phy::frameAirtimeUs(mode, 0) - kPreloadMarginUs;
+  // 8 bits per byte plus per-transaction overhead (header, CS hold time).
+  chunkWriteUs = (uint32_t)((uint64_t)kLoadChunk * 8 * 1000000 / DW1000Class::getSPIClock()) + 15;
 
   clearStatus(kStTxAll | kStRxGood | kStRxErr | kStRxTimeout | kStPll);
+  syncRxBuffers();
   rxEnable();
 }
 
@@ -314,11 +361,13 @@ uint32_t readDevId() { return readReg32(DEV_ID); }
 void resetMacState() {
   txActive = ackPending = autoAckActive = false;
   txBufferDirty = deferring = false;
-  cur.built = false;  // the TX buffer is gone after a reset
+  cur->built = nxt->built = false;
+  bufFrame = nullptr;  // the TX buffer is gone after a reset
   txNotBeforeUs = micros();
 }
 
-void completeCurrent(Outcome outcome) {
+// peerWaiting: the peer's ACK said it has frames to send (or we can't tell).
+void completeCurrent(Outcome outcome, bool peerWaiting = true) {
   const TxSlot& s = txq[txHead];
   stats.txFrames++;
   switch (outcome) {
@@ -337,65 +386,119 @@ void completeCurrent(Outcome outcome) {
   if (s.msdu[0] == frame::kHello) helloQueued = false;
   txHead = (txHead + 1) % kTxQueueLen;
   txCount--;
-  cur.built = false;
+  cur->built = false;
+  TxFrame* done = cur;  // nxt, possibly already in the TX buffer, moves up
+  cur = nxt;
+  nxt = done;
   deferring = false;
   lastOwnTxMs = millis();
-  // Leave the peer a window to reply before our next frame. It skips this
-  // pause after receiving from us, so traffic alternates when both have data.
-  txNotBeforeUs = micros() + cfg.backoffUs + randBelow(kGuardJitterUs);
+  // If the peer has something to send, leave it a window before our next
+  // frame. It skips this pause after receiving from us, so traffic
+  // alternates when both have data. Otherwise go on at once.
+  txNotBeforeUs = micros() + (peerWaiting ? cfg.backoffUs + randBelow(kGuardJitterUs) : 0);
 }
 
-void buildCurrent() {
-  const TxSlot& s = txq[txHead];
+// Our auto-ACKs carry "frame pending" while we have frames queued, so the
+// peer pauses for us only when we actually want to send (see completeCurrent).
+void updateAckPendBit() {
+  const bool want = tune.ackPend && txCount > 0;
+  if (want == ackPendBit) return;
+  DW1000.setBit(DW1000._syscfg, LEN_SYS_CFG, kSysCfgAckPendBit, want);
+  DW1000.writeSystemConfigurationRegister();
+  ackPendBit = want;
+}
+
+// Turns queue slot `slot` into a PSDU in f. Frames are built in queue order,
+// so sequence numbers stay in transmit order.
+void buildFrame(TxFrame* f, size_t slot) {
+  const TxSlot& s = txq[slot];
   const uint16_t dst = s.dst ? s.dst : currentPeer();
-  cur.wantAck = s.arq && cfg.retries > 0 && dst != frame::kBroadcast;
-  cur.seq = nextSeq++;
-  const size_t hl = frame::writeDataHeader(cur.psdu, cur.seq, cfg.panId, dst, myAddr, cur.wantAck);
-  memcpy(cur.psdu + hl, s.msdu, s.len);
-  cur.psduLen = hl + s.len + frame::kFcsLen;
-  cur.loaded = 0;
-  cur.attempts = 0;
-  cur.airUs = phy::frameAirtimeUs(mode, cur.psduLen);
-  cur.built = true;
+  f->wantAck = s.arq && cfg.retries > 0 && dst != frame::kBroadcast;
+  f->seq = nextSeq++;
+  const size_t hl = frame::writeDataHeader(f->psdu, f->seq, cfg.panId, dst, myAddr, f->wantAck);
+  memcpy(f->psdu + hl, s.msdu, s.len);
+  f->psduLen = hl + s.len + frame::kFcsLen;
+  f->attempts = 0;
+  f->airUs = phy::frameAirtimeUs(mode, f->psduLen);
+  f->built = true;
+  if (bufFrame == f) bufFrame = nullptr;  // the buffer held this slot's previous frame
 }
 
-// Writes the next chunk of the frame to the TX buffer. Returns true once the
-// whole frame is there. Chunking keeps poll() responsive to receive events.
-bool loadTxBuffer() {
-  if (txBufferDirty) {
-    // A short rewrite, so that replying right after an auto-ACK stays quick.
-    const uint16_t n = cur.loaded < kDirtyRewriteLen ? cur.loaded : kDirtyRewriteLen;
-    if (n) DW1000.writeBytes(TX_BUFFER, 0, cur.psdu, n);
+// Writes one more chunk of f to the TX buffer, replacing whatever frame was
+// there. Returns true once all of f is there. Chunking keeps poll()
+// responsive to receive events. With head=false the first chunk is left
+// alone: it still holds the frame waiting for its ACK (see preloadNext).
+bool loadTxBuffer(const TxFrame* f, bool head = true) {
+  const uint16_t dataLen = f->psduLen - frame::kFcsLen;
+  const uint8_t chunks = (dataLen + kLoadChunk - 1) / kLoadChunk;
+  const uint8_t all = (1u << chunks) - 1;
+  if (bufFrame != f) {
+    bufFrame = f;
+    bufChunks = 0;
     txBufferDirty = false;
   }
-  const uint16_t dataLen = cur.psduLen - frame::kFcsLen;
-  if (cur.loaded < dataLen) {
-    const uint16_t left = dataLen - cur.loaded;
-    const uint16_t n = left < kLoadChunk ? left : kLoadChunk;
-    DW1000.writeBytes(TX_BUFFER, cur.loaded, cur.psdu + cur.loaded, n);
-    cur.loaded += n;
+  if (txBufferDirty) {
+    // A short rewrite, so that replying right after an auto-ACK stays quick.
+    if (bufChunks & 1) {
+      const uint16_t n = dataLen < kDirtyRewriteLen ? dataLen : kDirtyRewriteLen;
+      DW1000.writeBytes(TX_BUFFER, 0, const_cast<uint8_t*>(f->psdu), n);
+    }
+    txBufferDirty = false;
   }
-  return cur.loaded >= dataLen;
+  const uint8_t todo = all & ~bufChunks & (head ? 0xFF : 0xFE);
+  if (todo) {
+    const uint8_t c = __builtin_ctz(todo);
+    const uint16_t off = c * kLoadChunk;
+    const uint16_t n = dataLen - off < kLoadChunk ? dataLen - off : kLoadChunk;
+    DW1000.writeBytes(TX_BUFFER, off, const_cast<uint8_t*>(f->psdu) + off, n);
+    bufChunks |= 1u << c;
+  }
+  return bufChunks == all;
+}
+
+// While cur waits for its ACK, put the next frame into the TX buffer. If cur
+// has to be retransmitted it is written again (rare on a good link).
+//
+// Writing the TX buffer while the ACK's bytes arrive spoils the ACK: always
+// with double buffering on, now and then without (measured: duplicates at
+// the peer). The ACK's preamble, SFD and PHR come first (~160 us at
+// 6.8 Mbit/s, ~2 ms at 110 kbit/s), so chunks are written only while they
+// finish before that. The first chunk (frame control, sequence number) waits
+// until after the ACK.
+//
+// Only for one-way traffic: when the peer has data too (TCP), a faster sender
+// mainly delays the peer's replies (measured: TCP -3 %, one-way +6 %).
+void preloadNext() {
+  if (!tune.preload || txCount < 2 || peerHadData) return;
+  if (micros() - ownTxDoneUs + chunkWriteUs > ackContentUs) return;
+  if (!nxt->built) buildFrame(nxt, (txHead + 1) % kTxQueueLen);
+  if (bufFrame != nxt && bufFrame == cur) {
+    // Keep cur's first chunk; the other chunks become nxt's.
+    bufFrame = nxt;
+    bufChunks = 0;
+  }
+  loadTxBuffer(nxt, false);
 }
 
 void startTx() {
   writeCtrl(kCtrlTrxOff);
   uint8_t fctrl[LEN_TX_FCTRL];
   memcpy(fctrl, txFctrlTemplate, sizeof(fctrl));
-  fctrl[0] = cur.psduLen & 0xFF;
-  fctrl[1] = (fctrl[1] & 0xE0) | ((cur.psduLen >> 8) & 0x03);
+  fctrl[0] = cur->psduLen & 0xFF;
+  fctrl[1] = (fctrl[1] & 0xE0) | ((cur->psduLen >> 8) & 0x03);
   DW1000.writeBytes(TX_FCTRL, NO_SUB, fctrl, LEN_TX_FCTRL);
   clearStatus(kStTxAll | kStRxGood | kStRxErr | kStRxTimeout);
-  writeCtrl(kCtrlTxStart | (cur.wantAck ? kCtrlWait4Resp : 0));
+  syncRxBuffers();  // the ACK we wait for must land in the buffer we read next
+  writeCtrl(kCtrlTxStart | (cur->wantAck ? kCtrlWait4Resp : 0));
   txActive = true;
   txStartUs = micros();
-  cur.attempts++;
+  cur->attempts++;
   stats.txAttempts++;
 }
 
 void tryTransmit() {
-  if (!cur.built) buildCurrent();
-  if (!loadTxBuffer()) return;
+  if (!cur->built) buildFrame(cur, txHead);
+  if (!loadTxBuffer(cur)) return;
   const uint32_t now = micros();
   if (!timeReached(now, txNotBeforeUs)) return;
 
@@ -417,10 +520,11 @@ void tryTransmit() {
 
 void onOwnTxDone() {
   txActive = false;
-  if (cur.wantAck) {
+  if (cur->wantAck) {
     // WAIT4RESP has already turned the receiver on.
     ackPending = true;
-    ackDeadlineUs = micros() + ackTimeout;
+    ownTxDoneUs = micros();
+    ackDeadlineUs = ownTxDoneUs + ackTimeout;
   } else {
     rxEnable();
     completeCurrent(Outcome::kSentNoAck);
@@ -429,14 +533,14 @@ void onOwnTxDone() {
 
 void onAckTimeout() {
   ackPending = false;
-  if (cur.attempts > cfg.retries) {
+  if (cur->attempts > cfg.retries) {
     completeCurrent(Outcome::kFailed);
     return;
   }
   // Exponential backoff sized in frame exchanges, so two nodes that collided
   // spread their retries apart. The receiver is still on from WAIT4RESP.
-  const uint32_t shift = cur.attempts > 4 ? 3 : cur.attempts - 1;
-  txNotBeforeUs = micros() + randBelow((cur.airUs + ackTimeout) << shift);
+  const uint32_t shift = cur->attempts > 4 ? 3 : cur->attempts - 1;
+  txNotBeforeUs = micros() + randBelow((cur->airUs + ackTimeout) << shift);
 }
 
 void notePeer(uint16_t src) {
@@ -455,10 +559,11 @@ void handleFrame(const frame::Header& h, const uint8_t* msdu, size_t len) {
     stats.rxAcks++;
     // Also accept an ACK that arrives after the timeout, while the retry is
     // still waiting out its backoff.
-    const bool awaiting = ackPending || (cur.built && cur.wantAck && cur.attempts && !txActive);
-    if (awaiting && h.seq == cur.seq) {
+    const bool awaiting = ackPending || (cur->built && cur->wantAck && cur->attempts && !txActive);
+    if (awaiting && h.seq == cur->seq) {
       ackPending = false;
-      completeCurrent(Outcome::kAcked);
+      peerHadData = h.framePending;
+      completeCurrent(Outcome::kAcked, h.framePending);
     }
     return;
   }
@@ -492,36 +597,70 @@ void handleFrame(const frame::Header& h, const uint8_t* msdu, size_t len) {
   if (rxHandler) rxHandler(h.src, msdu, len);
 }
 
+// Double buffering: the auto-ACK is out, so the receiver can take the next
+// frame into the other buffer while this one is still being read.
+void rearmAfterAutoAck() {
+  const uint32_t st = readStatus();
+  if (!(st & kStTxFrs)) return;
+  clearStatus(st & kStTxDone);
+  autoAckActive = false;
+  rxEnable();  // no pointer sync: the host-side buffer is still being read
+}
+
 void onRxGood(uint32_t st) {
+  // Clear the receive events first (as dwt_isr does): once the receiver is
+  // re-armed, new events belong to the next frame.
+  clearStatus(kStRxGood | kStRxErr | kStRxTimeout);
+
   uint8_t finfo[LEN_RX_FINFO];
   DW1000.readBytes(RX_FINFO, NO_SUB, finfo, LEN_RX_FINFO);
   const uint16_t psduLen = (finfo[0] | (finfo[1] << 8)) & 0x3FF;
   const uint16_t n = psduLen > frame::kFcsLen ? psduLen - frame::kFcsLen : 0;
-  if (n) DW1000.readBytes(RX_BUFFER, NO_SUB, rxBuf, n);
+  uint16_t got = n < kRxChunk ? n : kRxChunk;
+  if (got) DW1000.readBytes(RX_BUFFER, NO_SUB, rxBuf, got);
 
-  frame::Header h;
-  const size_t hl = frame::parse(rxBuf, n, &h);
-  const bool isData = hl && h.type == frame::kTypeData;
   // The chip sends the ACK by itself; it must finish before the receiver is
   // touched again. AAT can also be left over from an earlier frame, so check
   // that this one asked for an ACK. Read the bits directly rather than from
   // the parser: the chip ACKs anything its filter accepts.
   const bool ackOut = (st & kStAat) && n >= 1 && (rxBuf[0] & 0x07) == frame::kTypeData &&
                       (rxBuf[0] & frame::kFcAckRequest);
+  if ((st & kStAat) && !ackOut) clearStatus(kStAat);
+  if (ackOut) {
+    autoAckActive = true;
+    autoAckStartUs = micros();
+    txBufferDirty = true;
+  } else if (tune.dblBuf) {
+    rxEnable();  // the next frame goes to the other buffer
+  }
 
-  // Signal quality registers are only valid until the receiver is re-armed.
-  // Sample control frames and every 16th IP packet.
+  if (tune.dblBuf && autoAckActive) {
+    // Read in chunks and re-arm the receiver as soon as the ACK is out.
+    while (got < n) {
+      const uint16_t c = n - got < kRxChunk ? n - got : kRxChunk;
+      DW1000.readBytes(RX_BUFFER, got, rxBuf + got, c);  // offsets are multiples of 128, never NO_SUB
+      got += c;
+      if (autoAckActive && digitalReadFast(board::kDwIrq)) rearmAfterAutoAck();
+    }
+    if (autoAckActive) rearmAfterAutoAck();
+  } else if (got < n) {
+    DW1000.readBytes(RX_BUFFER, got, rxBuf + got, n - got);
+  }
+
+  frame::Header h;
+  const size_t hl = frame::parse(rxBuf, n, &h);
+  const bool isData = hl && h.type == frame::kTypeData;
+  // Signal quality: these registers belong to the buffer being read (they are
+  // double-buffered too), valid until it is released or the receiver re-armed
+  // in single-buffer mode. Sample control frames and every 16th IP packet.
   if (isData && (n == hl || rxBuf[hl] != frame::kIp || (ipRxCount++ & 15) == 0)) {
     stats.rssiDbm = DW1000.getReceivePower();
     stats.firstPathDbm = DW1000.getFirstPathPower();
   }
 
-  clearStatus(kStRxGood | kStRxErr | kStRxTimeout | (ackOut ? 0 : kStAat));
-  if (ackOut) {
-    autoAckActive = true;
-    autoAckStartUs = micros();
-    txBufferDirty = true;
-  } else {
+  if (tune.dblBuf) {
+    releaseRxBuffer();
+  } else if (!ackOut) {
     rxEnable();
   }
   deferring = false;
@@ -540,6 +679,7 @@ void onRxError(uint32_t st) {
   if (st & kStRxRfsl) stats.rxErrSync++;
   if (st & kStRxSfdTo) stats.rxErrSfdTimeout++;
   if (st & kStAffRej) stats.rxFiltered++;
+  if (st & kStRxOvrr) stats.rxOverruns++;
   if (st & kStRxTimeout) stats.rxTimeouts++;
   restartRx();
   lastRxEventMs = millis();
@@ -582,7 +722,7 @@ void resetRadio() {
 void checkTimers() {
   const uint32_t now = micros();
   if (ackPending && timeReached(now, ackDeadlineUs)) onAckTimeout();
-  if (txActive && now - txStartUs > cur.airUs + kTxWatchdogMarginUs) {
+  if (txActive && now - txStartUs > cur->airUs + kTxWatchdogMarginUs) {
     stats.txStuck++;
     logPrintf("TX did not complete, resetting radio");
     resetRadio();
@@ -674,6 +814,8 @@ bool reconfigure(const Config& c) {
 
 void setRxHandler(RxHandler handler) { rxHandler = handler; }
 
+Tuning& tuning() { return tune; }
+
 void poll() {
   if (!isReady) {
     // A failed reset (or a chip that was not there at boot) is retried.
@@ -684,7 +826,12 @@ void poll() {
   checkTimers();
   if (!isReady) return;
   housekeeping();
-  if (txCount && !txActive && !ackPending && !autoAckActive) tryTransmit();
+  if (txCount && !txActive && !ackPending && !autoAckActive) {
+    tryTransmit();
+  } else if (ackPending && !autoAckActive) {
+    preloadNext();
+  }
+  updateAckPendBit();
 }
 
 bool send(const uint8_t* msdu, size_t len, uint16_t dst, bool arq) {

@@ -38,6 +38,7 @@ size_t parse(const uint8_t* psdu, size_t len, Header* h) {
   if (len < kAckLen) return 0;
   const uint8_t type = psdu[0] & kFcTypeMask;
   h->type = type;
+  h->framePending = psdu[0] & kFcFramePending;
   h->ackRequest = psdu[0] & kFcAckRequest;
   h->seq = psdu[2];
   if (type == kTypeAck) {

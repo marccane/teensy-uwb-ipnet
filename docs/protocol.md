@@ -88,15 +88,22 @@ ack:  FC(2) seq(1)                                                         | FCS
 ### Channel access
 
 UWB has no carrier sense, so the firmware uses the DW1000's own receive
-status instead:
+status and the 802.15.4 "frame pending" bit:
 
 1. Before transmitting it checks the "preamble / SFD / PHR detected" status
    bits and defers while a frame is arriving.
-2. After its own frame completes it waits `backoff` (default 300 us) plus up to
-   64 us of jitter before sending again, so the peer gets a chance to reply.
+2. While a node has frames queued, its hardware ACKs carry "frame pending"
+   (AACKPEND). A sender that gets such an ACK waits `backoff` µs (default
+   800) before its next frame, so the peer can send. Otherwise it continues at
+   once.
 3. A node that has just received a unicast data frame may transmit at once.
    With traffic in both directions (e.g. TCP data and ACKs) the two ends then
    take turns.
-4. A missing ACK is retried up to `retries` times (default 3) after a random
+4. With one-way traffic the sender writes its next frame into the chip while
+   it waits for the ACK. It writes only as much as finishes before the ACK's
+   bytes arrive, because overlapping writes can spoil the ACK.
+5. A missing ACK is retried up to `retries` times (default 3) after a random
    backoff of 0..2^n frame-exchange times. A receiver that sees the same
    (source, sequence) twice drops the copy; the hardware has already re-ACKed it.
+
+Measurements and the alternatives that were tried: [throughput.md](throughput.md).

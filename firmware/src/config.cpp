@@ -107,7 +107,7 @@ const char* const kKeysHelp =
     "  peer <hex>               peer address, 0 = learn, ffff = broadcast only\n"
     "  retries 0..15            link retransmissions, 0 = no ACKs\n"
     "  udparq 0|1               also ACK/retransmit UDP packets\n"
-    "  backoff 0..10000         pause after own frame so the peer can reply, us\n"
+    "  backoff 0..10000         pause for the peer when its ACK says it has data, us\n"
     "  ipqueue 1..16            IP packets allowed to wait for the radio\n"
     "  txpower <hex>            TX_POWER register, 0 = reference value\n"
     "  spi 1..20                SPI clock, MHz\n";
@@ -125,7 +125,7 @@ Config defaults() {
   c.panId = 0x5557;  // "UW"
   c.shortAddr = 0;
   c.peerAddr = 0;
-  c.backoffUs = 300;
+  c.backoffUs = 800;  // > the peer's turnaround (~0.5 ms: reading 1 KB at 20 MHz)
   c.spiHz = kMaxSpiHz;
   c.ipQueue = 8;  // measured: ~5 % less TCP throughput than 16, a third less delay
   return c;

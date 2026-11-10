@@ -17,7 +17,7 @@ struct Config {
   uint16_t panId;
   uint16_t shortAddr;    // 0 = derived from the Teensy's factory MAC
   uint16_t peerAddr;     // 0 = learn from the first frame heard, 0xFFFF = always broadcast
-  uint16_t backoffUs;    // pause after our own frame before the next, so the peer can reply
+  uint16_t backoffUs;    // pause before our next frame when the peer's ACK says it has data
   uint32_t spiHz;        // DW1000 SPI clock once the chip runs from its PLL
   uint8_t ipQueue;       // IP packets that may wait for the radio, 1..kMaxIpQueue
 };

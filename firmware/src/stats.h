@@ -26,6 +26,7 @@ struct Stats {
   uint32_t rxErrSync;   // Reed-Solomon sync loss
   uint32_t rxErrSfdTimeout;
   uint32_t rxFiltered;  // rejected by the address filter (other PAN or node)
+  uint32_t rxOverruns;  // both RX buffers were full (double buffering)
   uint32_t rxTimeouts;
   uint32_t rxRestarts;  // receiver restarted by the idle watchdog
   uint32_t pllLossFlags;

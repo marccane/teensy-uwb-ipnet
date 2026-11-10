@@ -37,10 +37,12 @@ constexpr uint8_t kTypeData = 1;
 constexpr uint8_t kTypeAck = 2;
 
 // Frame control, first byte.
+constexpr uint8_t kFcFramePending = 0x10;
 constexpr uint8_t kFcAckRequest = 0x20;
 
 struct Header {
   uint8_t type;
+  bool framePending;  // in an ACK: the peer has frames waiting to send
   bool ackRequest;
   uint8_t seq;
   uint16_t pan;  // data frames only

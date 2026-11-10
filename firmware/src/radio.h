@@ -15,6 +15,18 @@ using RxHandler = void (*)(uint16_t src, const uint8_t* msdu, size_t len);
 
 constexpr size_t kTxQueueLen = 16;
 
+// Throughput features, switchable at runtime for measurements (console "opt").
+// Not stored. A dblBuf change takes effect at reconfigure().
+struct Tuning {
+  bool preload = true;  // load the next frame into the chip while waiting for an ACK
+  // DW1000 double RX buffering. Off: on this chip, writing the TX buffer while
+  // a frame arrives corrupts that frame when double buffering is on
+  // (measured), and the TX buffer is written while receiving all the time.
+  bool dblBuf = false;
+  bool ackPend = true;  // signal queued frames to the peer in our auto-ACKs (AACKPEND)
+};
+Tuning& tuning();
+
 // One-time pin/SPI setup, then reconfigure(). False if no DW1000 answers.
 bool begin(const Config& cfg);
 
